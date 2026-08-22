@@ -22,7 +22,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wikifm.WikiFMViewModel
 import com.wikifm.data.ArticleItem
 import com.wikifm.data.SearchResult
-import com.wikifm.ui.components.VoicePickerSheet
 import com.wikifm.ui.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -33,7 +32,6 @@ fun PlayerScreen(viewModel: WikiFMViewModel) {
     val isSearching by viewModel.isSearching.collectAsStateWithLifecycle()
 
     var query by remember { mutableStateOf("") }
-    var showVoicePicker by remember { mutableStateOf(false) }
     var showSleepTimer by remember { mutableStateOf(false) }
     var isBookmarked by remember(state.currentTitle) { mutableStateOf(viewModel.isCurrentBookmarked()) }
 
@@ -76,9 +74,6 @@ fun PlayerScreen(viewModel: WikiFMViewModel) {
                     modifier = Modifier.size(22.dp)
                 )
             }
-            IconButton(onClick = { showVoicePicker = true }) {
-                Icon(Icons.Default.RecordVoiceOver, "Voice", tint = TextSecondary, modifier = Modifier.size(22.dp))
-            }
         }
 
         Spacer(Modifier.height(20.dp))
@@ -110,7 +105,7 @@ fun PlayerScreen(viewModel: WikiFMViewModel) {
                 Modifier.size(48.dp).clip(RoundedCornerShape(14.dp))
                     .background(AccentAmber).clickable { if (query.isNotBlank()) viewModel.search(query) },
                 contentAlignment = Alignment.Center
-            ) { Icon(Icons.Default.Search, "Search", tint = DeepNavy) }
+            ) { Icon(Icons.Default.Search, "Search", tint = BgDeep) }
             Box(
                 Modifier.size(48.dp).clip(RoundedCornerShape(14.dp))
                     .background(GlassSurface).border(1.dp, GlassBorder, RoundedCornerShape(14.dp))
@@ -150,17 +145,6 @@ fun PlayerScreen(viewModel: WikiFMViewModel) {
         }
 
         Spacer(Modifier.height(32.dp))
-    }
-
-    // ── Voice picker ──
-    if (showVoicePicker) {
-        VoicePickerSheet(
-            voices = state.availableVoices,
-            selectedVoiceName = state.selectedVoiceName,
-            onSelect = { viewModel.setVoice(it) },
-            onPreview = { viewModel.previewVoice(it) },
-            onDismiss = { showVoicePicker = false }
-        )
     }
 
     // ── Sleep timer ──
@@ -245,7 +229,7 @@ private fun PlayerBody(
                 contentAlignment = Alignment.Center
             ) {
                 Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = null, tint = DeepNavy, modifier = Modifier.size(42.dp))
+                    contentDescription = null, tint = BgDeep, modifier = Modifier.size(42.dp))
             }
             ControlButton(icon = Icons.Default.SkipNext, desc = "Skip", onClick = { viewModel.skip() })
         }
@@ -296,7 +280,7 @@ private fun PlayerBody(
                             onClick = { viewModel.setJumpInterval(m) },
                             label = { Text(l, style = MaterialTheme.typography.labelSmall) },
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = AccentAmber, selectedLabelColor = DeepNavy,
+                                selectedContainerColor = AccentAmber, selectedLabelColor = BgDeep,
                                 containerColor = GlassSurface, labelColor = TextSecondary
                             )
                         )
@@ -388,7 +372,7 @@ private fun SmallIconButton(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SleepTimerSheet(activeSecs: Int, onSelect: (Int) -> Unit, onDismiss: () -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = DeepNavy,
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = BgDeep,
         dragHandle = {
             Box(Modifier.padding(top=12.dp, bottom=8.dp).size(width=40.dp, height=4.dp)
                 .clip(RoundedCornerShape(2.dp)).background(GlassBorder))

@@ -13,9 +13,9 @@ private val Scheme = darkColorScheme(
     onPrimary        = Color.Black,
     secondary        = AccentGreen,
     onSecondary      = Color.Black,
-    background       = DeepNavy,
+    background       = BgDeep,
     onBackground     = TextPrimary,
-    surface          = GlassSurface,
+    surface          = BgSurface,
     onSurface        = TextPrimary,
     surfaceVariant   = GlassSurfaceHi,
     onSurfaceVariant = TextSecondary,
@@ -25,11 +25,40 @@ private val Scheme = darkColorScheme(
 )
 
 val WikiFMTypography = Typography(
-    displayLarge  = TextStyle(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold,   fontSize = 26.sp, letterSpacing = 5.sp),
-    titleLarge    = TextStyle(fontFamily = FontFamily.Default,   fontWeight = FontWeight.SemiBold, fontSize = 18.sp, lineHeight = 24.sp),
-    titleMedium   = TextStyle(fontFamily = FontFamily.Default,   fontWeight = FontWeight.Medium,   fontSize = 15.sp),
-    bodyMedium    = TextStyle(fontFamily = FontFamily.Default,   fontWeight = FontWeight.Normal,   fontSize = 13.sp, lineHeight = 20.sp, color = TextSecondary),
-    labelSmall    = TextStyle(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Normal,   fontSize = 10.sp, letterSpacing = 1.5.sp, color = TextMuted)
+    displayLarge = TextStyle(
+        fontFamily = FontFamily.Monospace,
+        fontWeight = FontWeight.Bold,
+        fontSize = 26.sp,
+        letterSpacing = 5.sp,
+        color = TextPrimary
+    ),
+    titleLarge = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 18.sp,
+        lineHeight = 26.sp,
+        color = TextPrimary
+    ),
+    titleMedium = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Medium,
+        fontSize = 15.sp,
+        color = TextPrimary
+    ),
+    bodyMedium = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Normal,
+        fontSize = 13.sp,
+        lineHeight = 20.sp,
+        color = TextSecondary     // 80% white — readable
+    ),
+    labelSmall = TextStyle(
+        fontFamily = FontFamily.Monospace,
+        fontWeight = FontWeight.Normal,
+        fontSize = 10.sp,
+        letterSpacing = 1.5.sp,
+        color = TextMuted         // 50% white — still visible
+    )
 )
 
 @Composable

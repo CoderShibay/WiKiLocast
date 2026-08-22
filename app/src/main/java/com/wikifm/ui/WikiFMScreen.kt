@@ -36,7 +36,7 @@ fun WikiFMScreen(viewModel: WikiFMViewModel = viewModel()) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(DeepNavy, DeepPurple, Color(0xFF0D0518))))
+            .background(Brush.verticalGradient(listOf(BgDeep, BgMid, Color(0xFF0D0518))))
     ) {
         Scaffold(
             containerColor = Color.Transparent,

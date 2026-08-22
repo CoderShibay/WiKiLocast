@@ -48,7 +48,7 @@ fun VoicePickerSheet(
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = DeepNavy,
+        containerColor = BgDeep,
         dragHandle = {
             Box(
                 Modifier
@@ -105,7 +105,7 @@ fun VoicePickerSheet(
                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                     ) {
                         Text(if (isSelected) "Selected" else "Use",
-                            color = if (isSelected) DeepNavy else TextPrimary,
+                            color = if (isSelected) BgDeep else TextPrimary,
                             style = MaterialTheme.typography.labelSmall)
                     }
                 }
