@@ -56,7 +56,6 @@ class WikiFMViewModel(app: Application) : AndroidViewModel(app) {
         app.bindService(intent, connection, Context.BIND_AUTO_CREATE)
     }
 
-    // Search
     fun search(query: String) {
         if (query.isBlank()) { _searchResults.value = emptyList(); return }
         viewModelScope.launch {
@@ -67,12 +66,10 @@ class WikiFMViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun clearSearch() { _searchResults.value = emptyList() }
 
-    // Playback
     fun playTitle(title: String) {
         clearSearch()
         viewModelScope.launch {
-            val extract = state.value.currentExtract
-            localRepo.addToHistory(ArticleItem(title, extract))
+            localRepo.addToHistory(ArticleItem(title))
             _history.value = localRepo.loadHistory()
         }
         val svc = _service.value
@@ -90,17 +87,14 @@ class WikiFMViewModel(app: Application) : AndroidViewModel(app) {
     fun resume() = _service.value?.resume()
     fun skip() = _service.value?.skip()
     fun seekTo(progress: Float) = _service.value?.seekTo(progress)
-    fun retryDownload() = _service.value?.retryDownload()
     fun setSpeechRate(rate: Float) = _service.value?.setSpeechRate(rate)
     fun setJumpInterval(minutes: Int) = _service.value?.setJumpInterval(minutes)
     fun setSleepTimer(minutes: Int) = _service.value?.setSleepTimer(minutes)
 
-    // Playlist
     fun addToPlaylist(item: ArticleItem) = _service.value?.addToPlaylist(item)
     fun removeFromPlaylist(title: String) = _service.value?.removeFromPlaylist(title)
     fun clearPlaylist() = _service.value?.clearPlaylist()
 
-    // Bookmarks
     fun toggleBookmark() {
         val s = state.value
         if (s.currentTitle.isBlank()) return
@@ -109,8 +103,6 @@ class WikiFMViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun removeBookmark(title: String) { localRepo.removeBookmark(title); _bookmarks.value = localRepo.loadBookmarks() }
     fun isCurrentBookmarked() = localRepo.isBookmarked(state.value.currentTitle)
-
-    // History
     fun clearHistory() { localRepo.clearHistory(); _history.value = emptyList() }
 
     override fun onCleared() {
