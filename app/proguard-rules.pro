@@ -1,0 +1,3 @@
+-keep class com.wikifm.data.** { *; }
+-keepattributes Signature
+-keepattributes *Annotation*

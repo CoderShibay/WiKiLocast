@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Wiki FM</string>
+    <string name="notification_channel_name">Wiki FM Radio</string>
+    <string name="notification_channel_desc">Background article playback</string>
+</resources>
