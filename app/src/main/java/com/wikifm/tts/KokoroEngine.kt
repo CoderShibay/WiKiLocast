@@ -7,37 +7,23 @@ import com.k2fsa.sherpa.onnx.*
 import java.io.File
 
 /**
- * On-device TTS using Kokoro-en-v0_19 via sherpa-onnx.
- * Apache 2.0 licensed. No network calls during inference.
- *
- * Voice IDs (sid):
- *   0 = af_heart   (warm American female — default)
- *   1 = af_alloy
- *   2 = af_bella
- *   3 = am_adam    (American male)
- *   4 = am_michael
- *   5 = bf_emma    (British female)
- *   6 = bf_isabella
- *   7 = bm_george  (British male)
- *   8 = bm_lewis
+ * On-device TTS using Piper en_US-libritts_r-medium via sherpa-onnx.
+ * Apache 2.0 — trained on LibriTTS clean audiobook recordings.
+ * No network, no API keys. Inference runs on CPU.
  */
 class KokoroEngine(private val modelDir: File) {
 
     private var tts: OfflineTts? = null
     @Volatile private var stopRequested = false
 
-    /** Voice ID — default 0 (af_heart), set 7 for bm_george (British male) */
-    var voiceSid: Int = 7  // British male is more soothing for long-form listening
-
     fun init(): Boolean = runCatching {
-        val espeak = File(modelDir, "espeak-ng-data").absolutePath
         val config = OfflineTtsConfig(
             model = OfflineTtsModelConfig(
-                kokoro = OfflineTtsKokoroModelConfig(
+                vits = OfflineTtsVitsModelConfig(
                     model   = File(modelDir, "model.onnx").absolutePath,
-                    voices  = File(modelDir, "voices.bin").absolutePath,
                     tokens  = File(modelDir, "tokens.txt").absolutePath,
-                    dataDir = espeak
+                    dataDir = File(modelDir, "espeak-ng-data").absolutePath,
+                    lexicon = ""
                 ),
                 numThreads = 2,
                 debug      = false,
@@ -49,12 +35,12 @@ class KokoroEngine(private val modelDir: File) {
         true
     }.getOrElse { false }
 
-    val sampleRate: Int get() = tts?.sampleRate() ?: 24000
+    val sampleRate: Int get() = tts?.sampleRate() ?: 22050
 
     /**
-     * Synthesise [text] and stream it to the speaker.
-     * [onProgress] receives approximate char offset as words are played.
-     * [onDone] fires when the sentence finishes naturally (not on stop()).
+     * Synthesise [text] at [rate] and stream to speaker.
+     * [onProgress] receives approximate char offset.
+     * [onDone] fires when sentence finishes naturally.
      */
     fun speak(
         text: String,
@@ -66,8 +52,6 @@ class KokoroEngine(private val modelDir: File) {
         stopRequested = false
 
         val sr = engine.sampleRate()
-
-        // AudioTrack in streaming mode
         val minBuf = AudioTrack.getMinBufferSize(sr, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT)
         val track = AudioTrack.Builder()
             .setAudioAttributes(
@@ -88,25 +72,15 @@ class KokoroEngine(private val modelDir: File) {
             .build()
 
         track.play()
+        var totalWritten = 0
 
-        var totalSamplesWritten = 0
-
-        engine.generateWithCallback(
-            text  = text,
-            sid   = voiceSid,
-            speed = rate
-        ) { samples ->
-            if (stopRequested) {
-                track.pause(); track.flush()
-                return@generateWithCallback 0   // 0 = stop generation
-            }
+        engine.generateWithCallback(text = text, sid = 0, speed = rate) { samples ->
+            if (stopRequested) { return@generateWithCallback 0 }
             track.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
-            totalSamplesWritten += samples.size
-            // Map played samples → approximate char position
-            val secsPlayed = totalSamplesWritten.toFloat() / sr
-            val charsPerSec = 12f * rate
-            onProgress((secsPlayed * charsPerSec).toInt().coerceAtMost(text.length))
-            1   // 1 = continue
+            totalWritten += samples.size
+            val secsPlayed = totalWritten.toFloat() / sr
+            onProgress((secsPlayed * 12f * rate).toInt().coerceAtMost(text.length))
+            1
         }
 
         track.stop()
@@ -115,9 +89,7 @@ class KokoroEngine(private val modelDir: File) {
         if (!stopRequested) onDone()
     }
 
-    fun stop() {
-        stopRequested = true
-    }
+    fun stop() { stopRequested = true }
 
     fun release() {
         stop()

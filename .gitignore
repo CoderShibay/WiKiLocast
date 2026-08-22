@@ -15,3 +15,6 @@ local.properties
 # OS
 .DS_Store
 Thumbs.db
+
+# Voice model files — downloaded at build time, too large for git
+app/src/main/assets/voice/

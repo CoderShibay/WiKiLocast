@@ -21,7 +21,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.util.Locale
 
-enum class ModelStatus { UNCHECKED, DOWNLOADING, READY, FAILED }
+enum class ModelStatus { UNCHECKED, INSTALLING, READY, FAILED }
 
 data class WikiFMState(
     val isPlaying: Boolean = false,
@@ -95,9 +95,12 @@ class WikiFMService : Service() {
                 initKokoro()
             } else {
                 withContext(Dispatchers.Main) {
-                    _state.value = _state.value.copy(modelStatus = ModelStatus.DOWNLOADING)
+                    _state.value = _state.value.copy(
+                        modelStatus = ModelStatus.INSTALLING,
+                        downloadLabel = "Setting up Kokoro voice…"
+                    )
                 }
-                downloadAndInit()
+                installAndInit()
             }
         }
     }
@@ -124,12 +127,11 @@ class WikiFMService : Service() {
         }
     }
 
-    private fun downloadAndInit() {
+    private fun installAndInit() {
         scope.launch {
-            val result = modelManager.download { done, total, label ->
-                val progress = if (total > 0) done.toFloat() / total else 0f
+            val result = modelManager.installFromAssets { progress, label ->
                 _state.value = _state.value.copy(
-                    modelStatus = ModelStatus.DOWNLOADING,
+                    modelStatus = ModelStatus.INSTALLING,
                     downloadProgress = progress,
                     downloadLabel = label
                 )
@@ -139,7 +141,7 @@ class WikiFMService : Service() {
             } else {
                 _state.value = _state.value.copy(
                     modelStatus = ModelStatus.FAILED,
-                    downloadLabel = "Download failed — using system voice"
+                    downloadLabel = "Voice setup failed — using system voice"
                 )
             }
         }

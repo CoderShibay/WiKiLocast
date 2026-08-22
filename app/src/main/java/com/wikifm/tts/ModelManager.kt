@@ -3,99 +3,63 @@ package com.wikifm.tts
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
-import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import java.io.File
-import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 
 /**
- * Downloads and manages the Kokoro-en-v0_19 model for sherpa-onnx.
- * One-time download of ~95 MB, stored in app internal storage.
- * Apache 2.0 model from: github.com/k2-fsa/sherpa-onnx
+ * Manages the bundled Piper TTS voice on-device.
+ * Files are copied from APK assets → internal storage on first launch (~2-5 s).
+ * Apache 2.0 voice: vits-piper-en_US-libritts_r-medium (LibriTTS audiobooks).
  */
-class ModelManager(context: Context) {
+class ModelManager(private val context: Context) {
 
-    val modelDir: File = File(context.filesDir, "kokoro-en-v0_19")
-
-    private val MODEL_URL =
-        "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2"
+    val modelDir: File = File(context.filesDir, "voice-model")
 
     fun isReady(): Boolean =
         File(modelDir, "model.onnx").exists() &&
-        File(modelDir, "voices.bin").exists() &&
         File(modelDir, "tokens.txt").exists() &&
         File(modelDir, "espeak-ng-data").isDirectory
 
     /**
-     * Download and extract the Kokoro model.
-     * [onProgress] receives (bytesDownloaded, totalBytes, statusLabel).
+     * Copy bundled voice from APK assets to internal storage.
+     * Only runs once; subsequent launches skip this entirely.
      */
-    suspend fun download(onProgress: (Long, Long, String) -> Unit): Result<Unit> =
+    suspend fun installFromAssets(onProgress: (Float, String) -> Unit): Result<Unit> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val tmpDir = File(modelDir.parentFile, "kokoro-dl-tmp").also { it.mkdirs() }
-                val tarFile = File(tmpDir, "kokoro.tar.bz2")
+                modelDir.mkdirs()
 
-                try {
-                    // ── Download ──────────────────────────────────────────────
-                    onProgress(0, -1, "Connecting…")
-                    val conn = (URL(MODEL_URL).openConnection() as HttpURLConnection).apply {
-                        setRequestProperty("User-Agent", "WikiFM/1.0")
-                        connectTimeout = 15_000
-                        readTimeout    = 60_000
-                        connect()
-                    }
-                    val total = conn.contentLengthLong
-                    var done  = 0L
+                onProgress(0.0f, "Setting up voice…")
+                copyAsset("voice/model.onnx", File(modelDir, "model.onnx"))
 
-                    conn.inputStream.use { inp ->
-                        FileOutputStream(tarFile).use { out ->
-                            val buf = ByteArray(64 * 1024)
-                            var n: Int
-                            while (inp.read(buf).also { n = it } != -1) {
-                                out.write(buf, 0, n)
-                                done += n
-                                onProgress(done, total, "Downloading Kokoro voice…")
-                            }
-                        }
-                    }
+                onProgress(0.85f, "Almost done…")
+                copyAsset("voice/model.onnx.json", File(modelDir, "model.onnx.json"))
+                copyAsset("voice/tokens.txt", File(modelDir, "tokens.txt"))
 
-                    // ── Extract ───────────────────────────────────────────────
-                    onProgress(done, total, "Installing voice model…")
-                    modelDir.mkdirs()
-                    extractTarBz2(tarFile, modelDir.parentFile!!)
+                onProgress(0.92f, "Installing language data…")
+                copyAssetTree("voice/espeak-ng-data", File(modelDir, "espeak-ng-data"))
 
-                    onProgress(total, total, "Ready")
-                } finally {
-                    tmpDir.deleteRecursively()
-                }
+                onProgress(1.0f, "Voice ready")
             }
         }
 
-    private fun extractTarBz2(archive: File, destDir: File) {
-        TarArchiveInputStream(
-            BZip2CompressorInputStream(archive.inputStream().buffered())
-        ).use { tar ->
-            var entry = tar.nextEntry
-            while (entry != null) {
-                // Strip top-level directory prefix from entry name
-                val relativeName = entry.name.substringAfter("/").trimStart('/')
-                if (relativeName.isEmpty()) { entry = tar.nextEntry; continue }
+    private fun copyAsset(assetPath: String, dest: File) {
+        if (dest.exists() && dest.length() > 1024) return
+        dest.parentFile?.mkdirs()
+        try {
+            context.assets.open(assetPath).use { inp ->
+                dest.outputStream().use { inp.copyTo(it) }
+            }
+        } catch (_: Exception) { /* optional files like .json may not exist */ }
+    }
 
-                val outFile = File(destDir, relativeName)
-                if (entry.isDirectory) {
-                    outFile.mkdirs()
-                } else {
-                    outFile.parentFile?.mkdirs()
-                    FileOutputStream(outFile).use { out ->
-                        val buf = ByteArray(32 * 1024)
-                        var n: Int
-                        while (tar.read(buf).also { n = it } != -1) out.write(buf, 0, n)
-                    }
-                }
-                entry = tar.nextEntry
+    private fun copyAssetTree(assetPath: String, destDir: File) {
+        val children = context.assets.list(assetPath)
+        if (children.isNullOrEmpty()) {
+            copyAsset(assetPath, destDir)
+        } else {
+            destDir.mkdirs()
+            for (child in children) {
+                copyAssetTree("$assetPath/$child", File(destDir, child))
             }
         }
     }

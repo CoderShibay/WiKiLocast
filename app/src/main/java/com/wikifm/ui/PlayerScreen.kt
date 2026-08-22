@@ -78,7 +78,7 @@ fun PlayerScreen(viewModel: WikiFMViewModel) {
             }
 
             // ── Kokoro download banner ──
-            if (state.modelStatus == ModelStatus.DOWNLOADING || state.modelStatus == ModelStatus.FAILED) {
+            if (state.modelStatus == ModelStatus.INSTALLING || state.modelStatus == ModelStatus.FAILED) {
                 Spacer(Modifier.height(10.dp))
                 KokoroStatusBanner(state, viewModel)
             }
@@ -333,7 +333,7 @@ private fun KokoroStatusBanner(state: WikiFMState, viewModel: WikiFMViewModel) {
             .border(1.dp, GlassBorderDim, RoundedCornerShape(12.dp))
             .padding(14.dp)
     ) {
-        if (state.modelStatus == ModelStatus.DOWNLOADING) {
+        if (state.modelStatus == ModelStatus.INSTALLING) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(16.dp),
