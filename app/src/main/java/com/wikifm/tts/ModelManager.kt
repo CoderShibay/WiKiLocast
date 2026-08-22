@@ -10,16 +10,10 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
-/**
- * Downloads kokoro-en-v0_19 from sherpa-onnx releases on first launch.
- * ~95 MB total. Stored in app internal storage, never in the APK.
- */
 class ModelManager(context: Context) {
 
     val modelDir: File = File(context.filesDir, "kokoro-en-v0_19")
-
-    private val MODEL_URL =
-        "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2"
+    private val filesDir = context.filesDir
 
     fun isReady(): Boolean {
         val model = File(modelDir, "model.onnx")
@@ -29,10 +23,32 @@ class ModelManager(context: Context) {
                File(modelDir, "espeak-ng-data").isDirectory
     }
 
+    /**
+     * Previous builds extracted files to filesDir/ instead of filesDir/kokoro-en-v0_19/.
+     * Move them if found — avoids a 95 MB re-download.
+     */
+    fun migrateIfNeeded(): Boolean {
+        val wrongModel = File(filesDir, "model.onnx")
+        if (!wrongModel.exists() || wrongModel.length() < 50_000_000L) return false
+        if (isReady()) return false  // already in the right place
+
+        modelDir.mkdirs()
+        listOf("model.onnx", "voices.bin", "tokens.txt").forEach { name ->
+            val src = File(filesDir, name)
+            val dst = File(modelDir, name)
+            if (src.exists() && !dst.exists()) src.renameTo(dst)
+        }
+        val srcEspeak = File(filesDir, "espeak-ng-data")
+        val dstEspeak = File(modelDir, "espeak-ng-data")
+        if (srcEspeak.isDirectory && !dstEspeak.exists()) srcEspeak.renameTo(dstEspeak)
+
+        return isReady()
+    }
+
     suspend fun download(onProgress: (Long, Long, String) -> Unit): Result<Unit> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val tmp = File(modelDir.parentFile, "kokoro-dl-tmp").also { it.mkdirs() }
+                val tmp = File(filesDir, "kokoro-dl-tmp").also { it.mkdirs() }
                 val tar = File(tmp, "kokoro.tar.bz2")
                 try {
                     onProgress(0, -1, "Connecting…")
@@ -52,7 +68,8 @@ class ModelManager(context: Context) {
                     }
                     onProgress(done, total, "Installing…")
                     modelDir.mkdirs()
-                    extractTarBz2(tar, modelDir.parentFile!!)
+                    // Extract directly into modelDir (strips the kokoro-en-v0_19/ prefix)
+                    extractTarBz2(tar, modelDir)
                     onProgress(total, total, "Ready")
                 } finally {
                     tmp.deleteRecursively()
@@ -64,6 +81,7 @@ class ModelManager(context: Context) {
         TarArchiveInputStream(BZip2CompressorInputStream(archive.inputStream().buffered())).use { tar ->
             var entry = tar.nextEntry
             while (entry != null) {
+                // Strip the top-level "kokoro-en-v0_19/" prefix
                 val name = entry.name.substringAfter("/").trimStart('/')
                 if (name.isNotEmpty()) {
                     val out = File(destDir, name)
@@ -79,5 +97,10 @@ class ModelManager(context: Context) {
                 entry = tar.nextEntry
             }
         }
+    }
+
+    companion object {
+        private const val MODEL_URL =
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2"
     }
 }

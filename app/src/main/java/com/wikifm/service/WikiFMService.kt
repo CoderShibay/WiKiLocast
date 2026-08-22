@@ -95,6 +95,9 @@ class WikiFMService : Service() {
 
     private fun initKokoroAsync() {
         scope.launch(Dispatchers.IO) {
+            // Migrate files from wrong location if a previous build extracted them there
+            modelManager.migrateIfNeeded()
+
             if (modelManager.isReady()) {
                 tryStartKokoro()
             } else {
