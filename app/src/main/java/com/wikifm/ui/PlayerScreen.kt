@@ -23,6 +23,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wikifm.WikiFMViewModel
 import com.wikifm.data.ArticleItem
 import com.wikifm.data.SearchResult
+import com.wikifm.BuildConfig
 import com.wikifm.service.WikiFMState
 import com.wikifm.ui.theme.*
 import kotlin.math.abs
@@ -54,7 +55,22 @@ fun PlayerScreen(viewModel: WikiFMViewModel) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("WIKILOCAST", style = MaterialTheme.typography.displayLarge, color = AccentAmber)
-                    Text("WIKIPEDIA RADIO", style = MaterialTheme.typography.labelSmall)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("WIKIPEDIA RADIO", style = MaterialTheme.typography.labelSmall)
+                        Text("v${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.labelSmall, color = AccentAmber)
+                        // Kokoro status indicator
+                        when {
+                            state.kokoroReady -> {
+                                Text("● KOKORO", style = MaterialTheme.typography.labelSmall, color = AccentGreen)
+                            }
+                            state.kokoroDownloading -> {
+                                Text("↓ ${(state.kokoroProgress * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, color = AccentAmber)
+                            }
+                            else -> {
+                                Text("● SYSTEM TTS", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+                            }
+                        }
+                    }
                 }
                 if (state.sleepTimerSeconds > 0) {
                     val m = state.sleepTimerSeconds / 60; val s = state.sleepTimerSeconds % 60
