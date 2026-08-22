@@ -25,6 +25,7 @@ class KokoroEngine(private val modelDir: File) {
 
     private var tts: OfflineTts? = null
     @Volatile private var stopRequested = false
+    @Volatile private var audioTrack: AudioTrack? = null
 
     var voiceSid: Int = 7  // British male by default
 
@@ -82,6 +83,7 @@ class KokoroEngine(private val modelDir: File) {
             .setBufferSizeInBytes(minBuf * 4)
             .build()
 
+        audioTrack = track
         track.play()
         var totalWritten = 0
 
@@ -93,11 +95,16 @@ class KokoroEngine(private val modelDir: File) {
             1
         }
 
-        track.stop(); track.release()
+        audioTrack = null
+        try { track.stop() }    catch (_: Exception) {}
+        try { track.release() } catch (_: Exception) {}
         if (!stopRequested) onDone()
     }
 
-    fun stop() { stopRequested = true }
+    fun stop() {
+        stopRequested = true
+        try { audioTrack?.stop() } catch (_: Exception) {}  // stop() unblocks pending write()
+    }
 
     fun release() { stop(); tts?.release(); tts = null }
 }

@@ -195,23 +195,33 @@ class WikiFMService : Service() {
     private fun speakFrom(fromChunk: Int) {
         val engine = kokoro
         if (engine != null) {
-            // Kokoro: stream each chunk via neural TTS
             kokoroJob?.cancel()
             engine.stop()
+
+            // Snapshot the chunk list NOW so a mid-article article change can't corrupt the loop
+            val chunks  = articleChunks.toList()
+            val offsets = chunkOffsets.toList()
+
             kokoroJob = scope.launch(Dispatchers.IO) {
-                for (i in fromChunk until articleChunks.size) {
+                var playedToEnd = false
+                for (i in fromChunk until chunks.size) {
                     if (!isActive || !_state.value.isPlaying) break
                     pausedAtChunk = i
-                    var done = false
+                    var chunkDone = false
                     engine.speak(
-                        text = articleChunks[i],
+                        text = chunks[i],
                         rate = _state.value.speechRate,
-                        onProgress = { offset -> currentAbsoluteChar = chunkOffsets.getOrElse(i) { 0 } + offset }
-                    ) { done = true }
-                    if (!done) break
-                    if (i == articleChunks.lastIndex && _state.value.isPlaying) {
-                        scope.launch { onArticleFinished() }
-                    }
+                        onProgress = { offset ->
+                            currentAbsoluteChar = offsets.getOrElse(i) { 0 } + offset
+                        },
+                        onDone = { chunkDone = true }
+                    )
+                    if (!chunkDone) break          // stopped mid-chunk
+                    if (i == chunks.lastIndex) { playedToEnd = true; break }
+                }
+                // Trigger next article AFTER the loop — never from inside it
+                if (playedToEnd && isActive && _state.value.isPlaying) {
+                    withContext(Dispatchers.Main) { onArticleFinished() }
                 }
             }
         } else {
