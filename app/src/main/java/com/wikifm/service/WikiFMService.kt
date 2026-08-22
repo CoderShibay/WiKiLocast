@@ -24,7 +24,7 @@ data class WikiFMState(
     val isLoading: Boolean = false,
     val currentTitle: String = "",
     val currentExtract: String = "",
-    val speechRate: Float = 1.0f,
+    val speechRate: Float = 0.95f,
     val jumpIntervalMinutes: Int = 3,
     val error: String? = null,
     val playlist: List<ArticleItem> = emptyList(),
@@ -54,6 +54,10 @@ class WikiFMService : Service() {
     private var sleepTimerJob: Job? = null
     private val queue = mutableListOf<ArticleItem>()
 
+    // Chunk tracking for accurate pause/resume
+    private var articleChunks: List<String> = emptyList()
+    private var pausedAtChunk: Int = 0
+
     override fun onBind(intent: Intent): IBinder = binder
 
     override fun onCreate() {
@@ -64,15 +68,24 @@ class WikiFMService : Service() {
             if (status == TextToSpeech.SUCCESS) {
                 ttsReady = true
                 tts?.language = Locale.US
+                tts?.setPitch(0.92f)          // slightly lower — calmer, more radio-like
+                tts?.setSpeechRate(0.95f)     // slightly slower default
                 tts?.setOnUtteranceProgressListener(utteranceListener)
+
                 val voices = qualityVoices()
-                val selected = voices.find { it.name == savedVoice } ?: voices.firstOrNull()
+                val selected = voices.find { it.name == savedVoice }
+                    ?: bestSoothingVoice(voices)
                 if (selected != null) tts?.voice = selected
+
                 _state.value = _state.value.copy(
                     availableVoices = voices,
                     selectedVoiceName = selected?.name ?: ""
                 )
-                pendingText?.let { speakText(it) }
+                pendingText?.let { t ->
+                    articleChunks = chunkText(t)
+                    pausedAtChunk = 0
+                    speakFrom(0)
+                }
                 pendingText = null
             }
         }
@@ -86,21 +99,59 @@ class WikiFMService : Service() {
             ?.sortedWith(compareByDescending<Voice> { it.quality }.thenBy { it.locale.country }.thenBy { it.name })
             ?.toList() ?: emptyList()
 
+    // Prefer British voices — calmer, more soothing for long-form listening
+    private fun bestSoothingVoice(voices: List<Voice>): Voice? {
+        val british = voices.filter { it.locale.country == "GB" }
+        if (british.isNotEmpty()) return british.maxByOrNull { it.quality }
+        val australian = voices.filter { it.locale.country == "AU" }
+        if (australian.isNotEmpty()) return australian.maxByOrNull { it.quality }
+        return voices.maxByOrNull { it.quality }
+    }
+
     private val utteranceListener = object : UtteranceProgressListener() {
-        override fun onStart(utteranceId: String?) {}
+        override fun onStart(utteranceId: String?) {
+            // Track which chunk we're currently reading
+            utteranceId?.removePrefix("chunk_")?.toIntOrNull()?.let { pausedAtChunk = it }
+        }
         override fun onError(utteranceId: String?) {}
         override fun onDone(utteranceId: String?) {
-            if (utteranceId == LAST_CHUNK && _state.value.isPlaying) {
+            val idx = utteranceId?.removePrefix("chunk_")?.toIntOrNull() ?: return
+            if (idx == articleChunks.lastIndex && _state.value.isPlaying) {
                 scope.launch {
                     if (queue.isNotEmpty()) {
                         val next = queue.removeAt(0)
                         _state.value = _state.value.copy(playlist = queue.toList())
                         loadAndPlay(next.title)
-                    } else {
-                        autoJump()
-                    }
+                    } else autoJump()
                 }
             }
+        }
+    }
+
+    // Speak from a specific chunk index (enables proper resume)
+    private fun speakFrom(fromChunk: Int) {
+        if (!ttsReady || articleChunks.isEmpty()) return
+        for (i in fromChunk until articleChunks.size) {
+            val mode = if (i == fromChunk) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+            tts?.speak(articleChunks[i], mode, null, "chunk_$i")
+        }
+    }
+
+    // New article — resets chunk tracking
+    private fun speakText(text: String) {
+        if (!ttsReady) { pendingText = text; return }
+        pendingText = null
+        articleChunks = chunkText(text)
+        pausedAtChunk = 0
+        speakFrom(0)
+    }
+
+    private fun chunkText(text: String): List<String> {
+        val max = 3500
+        return text.split(Regex("(?<=[.!?])\\s+")).fold(mutableListOf()) { acc, s ->
+            if (acc.isEmpty() || acc.last().length + s.length + 1 > max) acc.add(s)
+            else acc[acc.lastIndex] = "${acc.last()} $s"
+            acc
         }
     }
 
@@ -123,6 +174,7 @@ class WikiFMService : Service() {
     }
 
     private suspend fun loadAndPlay(title: String) {
+        startFg(buildNotification("Loading…"))
         repository.getSummary(title)
             .onSuccess { playArticle(it) }
             .onFailure { e -> fail(e.message ?: "Network error") }
@@ -149,25 +201,6 @@ class WikiFMService : Service() {
         )
     }
 
-    private fun speakText(text: String) {
-        if (!ttsReady) { pendingText = text; return }
-        pendingText = null
-        tts?.stop()
-        chunkText(text).forEachIndexed { i, chunk ->
-            val id = if (i == chunkText(text).lastIndex) LAST_CHUNK else "c$i"
-            tts?.speak(chunk, if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, id)
-        }
-    }
-
-    private fun chunkText(text: String): List<String> {
-        val max = 3500
-        return text.split(Regex("(?<=[.!?])\\s+")).fold(mutableListOf()) { acc, s ->
-            if (acc.isEmpty() || acc.last().length + s.length + 1 > max) acc.add(s)
-            else acc[acc.lastIndex] = "${acc.last()} $s"
-            acc
-        }
-    }
-
     private fun scheduleJump() {
         jumpJob?.cancel()
         val min = _state.value.jumpIntervalMinutes
@@ -190,7 +223,9 @@ class WikiFMService : Service() {
     }
 
     fun pause() {
-        tts?.stop(); jumpJob?.cancel(); sleepTimerJob?.cancel()
+        tts?.stop()           // pausedAtChunk is already set from onStart
+        jumpJob?.cancel()
+        sleepTimerJob?.cancel()
         _state.value = _state.value.copy(isPlaying = false, sleepTimerSeconds = 0)
         stopForeground(STOP_FOREGROUND_DETACH)
     }
@@ -199,17 +234,33 @@ class WikiFMService : Service() {
         if (_state.value.currentExtract.isBlank()) return
         _state.value = _state.value.copy(isPlaying = true)
         startFg(buildNotification(_state.value.currentTitle))
-        speakText(_state.value.currentExtract)
+        speakFrom(pausedAtChunk)   // resume from exact chunk where we stopped
         scheduleJump()
     }
 
-    fun skip() = scope.launch {
-        tts?.stop(); jumpJob?.cancel()
-        if (queue.isNotEmpty()) {
-            val next = queue.removeAt(0)
-            _state.value = _state.value.copy(playlist = queue.toList())
-            loadAndPlay(next.title)
-        } else autoJump()
+    fun skip() {
+        scope.launch {
+            tts?.stop()
+            jumpJob?.cancel()
+            _state.value = _state.value.copy(isLoading = true)
+            startFg(buildNotification("Skipping…"))
+            if (queue.isNotEmpty()) {
+                val next = queue.removeAt(0)
+                _state.value = _state.value.copy(playlist = queue.toList())
+                loadAndPlay(next.title)
+            } else {
+                autoJump()
+            }
+        }
+    }
+
+    // Applies immediately — restarts from current chunk with new rate
+    fun setSpeechRate(rate: Float) {
+        tts?.setSpeechRate(rate)
+        _state.value = _state.value.copy(speechRate = rate)
+        if (_state.value.isPlaying && articleChunks.isNotEmpty()) {
+            speakFrom(pausedAtChunk)
+        }
     }
 
     // Playlist
@@ -219,22 +270,18 @@ class WikiFMService : Service() {
             _state.value = _state.value.copy(playlist = queue.toList())
         }
     }
-
     fun removeFromPlaylist(title: String) {
         queue.removeAll { it.title == title }
         _state.value = _state.value.copy(playlist = queue.toList())
     }
-
-    fun clearPlaylist() {
-        queue.clear()
-        _state.value = _state.value.copy(playlist = emptyList())
-    }
+    fun clearPlaylist() { queue.clear(); _state.value = _state.value.copy(playlist = emptyList()) }
 
     // Voice
     fun setVoice(voice: Voice) {
         tts?.voice = voice
         prefs().edit().putString("voice_name", voice.name).apply()
         _state.value = _state.value.copy(selectedVoiceName = voice.name)
+        if (_state.value.isPlaying) speakFrom(pausedAtChunk)
     }
 
     fun previewVoice(voice: Voice) {
@@ -242,27 +289,18 @@ class WikiFMService : Service() {
         tts?.speak("Hello. I am your Wikipedia radio guide.", TextToSpeech.QUEUE_FLUSH, null, "preview")
     }
 
-    fun setSpeechRate(rate: Float) {
-        tts?.setSpeechRate(rate)
-        _state.value = _state.value.copy(speechRate = rate)
-    }
-
     fun setJumpInterval(minutes: Int) {
         _state.value = _state.value.copy(jumpIntervalMinutes = minutes)
         if (_state.value.isPlaying) scheduleJump()
     }
 
-    // Sleep timer
     fun setSleepTimer(minutes: Int) {
         sleepTimerJob?.cancel()
         if (minutes == 0) { _state.value = _state.value.copy(sleepTimerSeconds = 0); return }
         var remaining = minutes * 60
         _state.value = _state.value.copy(sleepTimerSeconds = remaining)
         sleepTimerJob = scope.launch {
-            while (remaining > 0) {
-                delay(1000); remaining--
-                _state.value = _state.value.copy(sleepTimerSeconds = remaining)
-            }
+            while (remaining > 0) { delay(1000); remaining--; _state.value = _state.value.copy(sleepTimerSeconds = remaining) }
             pause()
         }
     }
@@ -295,6 +333,5 @@ class WikiFMService : Service() {
     companion object {
         const val CHANNEL_ID = "wikifm_channel"
         const val NOTIFICATION_ID = 1
-        const val LAST_CHUNK = "LAST_CHUNK"
     }
 }
