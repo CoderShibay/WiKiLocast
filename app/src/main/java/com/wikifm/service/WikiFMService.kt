@@ -182,8 +182,41 @@ class WikiFMService : Service() {
     }
 
     /**
-     * Queue chunks starting from [fromChunk].
-     * Always stops current playback first for a clean slate.
+     * Find the start of the sentence that contains [absoluteChar].
+     * Searches backwards for the nearest ". " / "! " / "? " before that position.
+     */
+    private fun findSentenceStart(absoluteChar: Int): Int {
+        if (absoluteChar <= 0 || articleText.isEmpty()) return 0
+        val safePos = absoluteChar.coerceAtMost(articleText.length)
+        val last = maxOf(
+            articleText.lastIndexOf(". ", safePos),
+            articleText.lastIndexOf("! ", safePos),
+            articleText.lastIndexOf("? ", safePos)
+        )
+        return if (last >= 0) (last + 2).coerceAtMost(articleText.length) else 0
+    }
+
+    /**
+     * Rebuild chunks starting from [startChar] in [articleText] and begin speaking.
+     * This is the single entry-point for resume, speed-change, and seeking so they
+     * all use sentence-level precision instead of coarse chunk-level.
+     */
+    private fun seekToText(startChar: Int) {
+        val safeStart = startChar.coerceIn(0, articleText.length)
+        val remaining = articleText.substring(safeStart)
+        if (remaining.isBlank()) return
+        val newChunks = chunkText(remaining)
+        val newOffsets = computeOffsets(newChunks).map { it + safeStart }
+        articleChunks = newChunks
+        chunkOffsets = newOffsets
+        pausedAtChunk = 0
+        currentAbsoluteChar = safeStart
+        speakFrom(0)
+    }
+
+    /**
+     * Low-level: queue [articleChunks] starting from [fromChunk].
+     * Always stops current playback first.
      */
     private fun speakFrom(fromChunk: Int) {
         if (!ttsReady || articleChunks.isEmpty()) return
@@ -277,7 +310,7 @@ class WikiFMService : Service() {
         if (_state.value.currentExtract.isBlank()) return
         _state.value = _state.value.copy(isPlaying = true)
         startFg(buildNotification(_state.value.currentTitle))
-        speakFrom(pausedAtChunk)   // ← exact chunk where we stopped
+        seekToText(findSentenceStart(currentAbsoluteChar))
         scheduleJump()
         startProgressTimer()
     }
@@ -298,11 +331,8 @@ class WikiFMService : Service() {
 
     fun seekTo(progress: Float) {
         val targetChar = (progress * articleText.length).toInt()
-        val chunkIdx = chunkOffsets.indices.lastOrNull { chunkOffsets[it] <= targetChar } ?: 0
-        pausedAtChunk = chunkIdx
-        currentAbsoluteChar = targetChar
         _state.value = _state.value.copy(playbackProgress = progress)
-        if (_state.value.isPlaying) speakFrom(chunkIdx)
+        seekToText(findSentenceStart(targetChar))
     }
 
     // ─── Jump / auto-advance ─────────────────────────────────────────────────
@@ -333,14 +363,14 @@ class WikiFMService : Service() {
     fun setSpeechRate(rate: Float) {
         tts?.setSpeechRate(rate)
         _state.value = _state.value.copy(speechRate = rate)
-        if (_state.value.isPlaying && articleChunks.isNotEmpty()) speakFrom(pausedAtChunk)
+        if (_state.value.isPlaying && articleText.isNotBlank()) seekToText(findSentenceStart(currentAbsoluteChar))
     }
 
     fun setVoice(voice: Voice) {
         tts?.voice = voice
         prefs().edit().putString("voice_name", voice.name).apply()
         _state.value = _state.value.copy(selectedVoiceName = voice.name)
-        if (_state.value.isPlaying) speakFrom(pausedAtChunk)
+        if (_state.value.isPlaying) seekToText(findSentenceStart(currentAbsoluteChar))
     }
 
     fun previewVoice(voice: Voice) {
