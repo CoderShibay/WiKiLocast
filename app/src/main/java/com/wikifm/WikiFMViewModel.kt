@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
-import android.speech.tts.Voice
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.wikifm.data.ArticleItem
@@ -91,11 +90,10 @@ class WikiFMViewModel(app: Application) : AndroidViewModel(app) {
     fun resume() = _service.value?.resume()
     fun skip() = _service.value?.skip()
     fun seekTo(progress: Float) = _service.value?.seekTo(progress)
+    fun retryDownload() = _service.value?.retryDownload()
     fun setSpeechRate(rate: Float) = _service.value?.setSpeechRate(rate)
     fun setJumpInterval(minutes: Int) = _service.value?.setJumpInterval(minutes)
     fun setSleepTimer(minutes: Int) = _service.value?.setSleepTimer(minutes)
-    fun setVoice(voice: Voice) = _service.value?.setVoice(voice)
-    fun previewVoice(voice: Voice) = _service.value?.previewVoice(voice)
 
     // Playlist
     fun addToPlaylist(item: ArticleItem) = _service.value?.addToPlaylist(item)

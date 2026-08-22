@@ -23,6 +23,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wikifm.WikiFMViewModel
 import com.wikifm.data.ArticleItem
 import com.wikifm.data.SearchResult
+import com.wikifm.service.ModelStatus
 import com.wikifm.service.WikiFMState
 import com.wikifm.ui.theme.*
 import kotlin.math.abs
@@ -74,6 +75,12 @@ fun PlayerScreen(viewModel: WikiFMViewModel) {
                         modifier = Modifier.size(22.dp)
                     )
                 }
+            }
+
+            // ── Kokoro download banner ──
+            if (state.modelStatus == ModelStatus.DOWNLOADING || state.modelStatus == ModelStatus.FAILED) {
+                Spacer(Modifier.height(10.dp))
+                KokoroStatusBanner(state, viewModel)
             }
 
             Spacer(Modifier.height(16.dp))
@@ -312,6 +319,51 @@ private fun PlayerFooter(state: WikiFMState, viewModel: WikiFMViewModel) {
             }
 
             TransportBtn(Icons.Default.SkipNext, "Skip", 44.dp) { viewModel.skip() }
+        }
+    }
+}
+
+@Composable
+private fun KokoroStatusBanner(state: WikiFMState, viewModel: WikiFMViewModel) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(GlassSurface)
+            .border(1.dp, GlassBorderDim, RoundedCornerShape(12.dp))
+            .padding(14.dp)
+    ) {
+        if (state.modelStatus == ModelStatus.DOWNLOADING) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = AccentAmber
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(state.downloadLabel.ifBlank { "Downloading Kokoro voice…" },
+                    style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+            }
+            if (state.downloadProgress > 0f) {
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { state.downloadProgress },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = AccentAmber,
+                    trackColor = GlassBorder
+                )
+                Spacer(Modifier.height(4.dp))
+                Text("${(state.downloadProgress * 100).toInt()}% — using system voice until ready",
+                    style = MaterialTheme.typography.labelSmall)
+            }
+        } else if (state.modelStatus == ModelStatus.FAILED) {
+            Text("Kokoro voice download failed. Using system voice.",
+                style = MaterialTheme.typography.bodyMedium, color = AccentRed)
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = { viewModel.retryDownload() },
+                colors = ButtonDefaults.buttonColors(containerColor = AccentAmber)
+            ) { Text("Retry", color = BgDeep) }
         }
     }
 }

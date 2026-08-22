@@ -14,10 +14,14 @@ import com.wikifm.R
 import com.wikifm.data.ArticleItem
 import com.wikifm.data.WikiSummary
 import com.wikifm.data.WikipediaRepository
+import com.wikifm.tts.KokoroEngine
+import com.wikifm.tts.ModelManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.util.Locale
+
+enum class ModelStatus { UNCHECKED, DOWNLOADING, READY, FAILED }
 
 data class WikiFMState(
     val isPlaying: Boolean = false,
@@ -30,9 +34,11 @@ data class WikiFMState(
     val playlist: List<ArticleItem> = emptyList(),
     val suggestions: List<ArticleItem> = emptyList(),
     val sleepTimerSeconds: Int = 0,
-    val availableVoices: List<Voice> = emptyList(),
-    val selectedVoiceName: String = "",
-    val playbackProgress: Float = 0f   // 0.0 – 1.0
+    val playbackProgress: Float = 0f,
+    // Kokoro model download
+    val modelStatus: ModelStatus = ModelStatus.UNCHECKED,
+    val downloadProgress: Float = 0f,
+    val downloadLabel: String = ""
 )
 
 class WikiFMService : Service() {
@@ -48,121 +54,228 @@ class WikiFMService : Service() {
     private val _state = MutableStateFlow(WikiFMState())
     val state: StateFlow<WikiFMState> = _state
 
-    private var tts: TextToSpeech? = null
-    private var ttsReady = false
+    // ── Kokoro (primary TTS) ──────────────────────────────────────────────────
+    private val modelManager by lazy { ModelManager(this) }
+    private var kokoro: KokoroEngine? = null
+
+    // ── Android TTS (fallback while model downloads) ──────────────────────────
+    private var androidTts: TextToSpeech? = null
+    private var androidTtsReady = false
+
     private var pendingText: String? = null
     private var jumpJob: Job? = null
     private var sleepTimerJob: Job? = null
     private var progressJob: Job? = null
+    private var speakJob: Job? = null
     private val queue = mutableListOf<ArticleItem>()
 
-    // Chunk tracking – @Volatile so the TTS callback thread and main thread agree
-    private var articleChunks: List<String> = emptyList()
-    private var chunkOffsets: List<Int> = emptyList()    // char start of each chunk in full text
+    // Sentence-level position tracking
     private var articleText: String = ""
-
-    @Volatile private var pausedAtChunk: Int = 0
+    private var articleChunks: List<String> = emptyList()
+    private var chunkOffsets: List<Int> = emptyList()
     @Volatile private var currentAbsoluteChar: Int = 0
+
+    // Android TTS chunk tracking (used only when Kokoro not ready)
+    @Volatile private var pausedAtChunk: Int = 0
 
     override fun onBind(intent: Intent): IBinder = binder
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        val savedVoice = prefs().getString("voice_name", "") ?: ""
-        tts = TextToSpeech(this) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                ttsReady = true
-                tts?.language = Locale.US
-                tts?.setPitch(0.85f)       // noticeably lower, calmer radio tone
-                tts?.setSpeechRate(1.0f)   // default 1x
-                tts?.setOnUtteranceProgressListener(utteranceListener)
+        checkAndInitKokoro()
+        initAndroidTtsFallback()
+    }
 
-                val voices = qualityVoices()
-                val selected = voices.find { it.name == savedVoice } ?: pickSoothingVoice(voices)
-                if (selected != null) {
-                    tts?.voice = selected
-                    _state.value = _state.value.copy(
-                        availableVoices = voices,
-                        selectedVoiceName = selected.name
-                    )
+    // ─── Kokoro init / download ───────────────────────────────────────────────
+
+    private fun checkAndInitKokoro() {
+        scope.launch(Dispatchers.IO) {
+            if (modelManager.isReady()) {
+                initKokoro()
+            } else {
+                withContext(Dispatchers.Main) {
+                    _state.value = _state.value.copy(modelStatus = ModelStatus.DOWNLOADING)
                 }
-
-                pendingText?.let { loadAndSpeak(it) }
-                pendingText = null
+                downloadAndInit()
             }
         }
     }
 
-    private fun prefs() = getSharedPreferences("wikifm_data", Context.MODE_PRIVATE)
-
-    private fun qualityVoices(): List<Voice> =
-        tts?.voices
-            ?.filter { it.locale.language == "en" && !it.isNetworkConnectionRequired && it.quality >= Voice.QUALITY_NORMAL }
-            ?.sortedWith(compareByDescending<Voice> { it.quality }.thenBy { it.name })
-            ?.toList() ?: emptyList()
-
-    /**
-     * Pick a voice that sounds calm and radio-like.
-     * British → Indian → Irish → highest quality American.
-     * These tend to have a warmer, more natural cadence for long-form listening.
-     */
-    private fun pickSoothingVoice(voices: List<Voice>): Voice? {
-        for (country in listOf("GB", "IN", "IE", "AU", "NZ")) {
-            val match = voices.filter { it.locale.country == country }.maxByOrNull { it.quality }
-            if (match != null) return match
+    private fun initKokoro() {
+        val engine = KokoroEngine(modelManager.modelDir)
+        if (engine.init()) {
+            kokoro = engine
+            scope.launch(Dispatchers.Main) {
+                _state.value = _state.value.copy(
+                    modelStatus = ModelStatus.READY,
+                    downloadLabel = "Kokoro voice ready"
+                )
+                pendingText?.let { loadAndSpeak(it) }
+                pendingText = null
+            }
+        } else {
+            scope.launch(Dispatchers.Main) {
+                _state.value = _state.value.copy(
+                    modelStatus = ModelStatus.FAILED,
+                    downloadLabel = "Voice init failed — using system voice"
+                )
+            }
         }
-        return voices.maxByOrNull { it.quality }
     }
 
-    // ─── Utterance listener ─────────────────────────────────────────────────
-
-    private val utteranceListener = object : UtteranceProgressListener() {
-
-        override fun onStart(utteranceId: String?) {
-            val idx = utteranceId?.removePrefix("chunk_")?.toIntOrNull() ?: return
-            pausedAtChunk = idx
-            currentAbsoluteChar = chunkOffsets.getOrElse(idx) { 0 }
+    private fun downloadAndInit() {
+        scope.launch {
+            val result = modelManager.download { done, total, label ->
+                val progress = if (total > 0) done.toFloat() / total else 0f
+                _state.value = _state.value.copy(
+                    modelStatus = ModelStatus.DOWNLOADING,
+                    downloadProgress = progress,
+                    downloadLabel = label
+                )
+            }
+            if (result.isSuccess) {
+                withContext(Dispatchers.IO) { initKokoro() }
+            } else {
+                _state.value = _state.value.copy(
+                    modelStatus = ModelStatus.FAILED,
+                    downloadLabel = "Download failed — using system voice"
+                )
+            }
         }
+    }
 
-        // Word-level progress (API 26+) – fires for every word spoken
+    fun retryDownload() = checkAndInitKokoro()
+
+    // ─── Android TTS fallback ────────────────────────────────────────────────
+
+    private fun initAndroidTtsFallback() {
+        androidTts = TextToSpeech(this) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                androidTtsReady = true
+                androidTts?.language = Locale.US
+                androidTts?.setPitch(0.85f)
+                androidTts?.setSpeechRate(1.0f)
+                androidTts?.setOnUtteranceProgressListener(androidUtteranceListener)
+            }
+        }
+    }
+
+    private val androidUtteranceListener = object : UtteranceProgressListener() {
+        override fun onStart(utteranceId: String?) {
+            utteranceId?.removePrefix("chunk_")?.toIntOrNull()?.let { pausedAtChunk = it }
+        }
         override fun onRangeStart(utteranceId: String, start: Int, end: Int, frame: Int) {
             val idx = utteranceId.removePrefix("chunk_").toIntOrNull() ?: return
             currentAbsoluteChar = chunkOffsets.getOrElse(idx) { 0 } + start
         }
-
         override fun onError(utteranceId: String?) {}
-
         override fun onDone(utteranceId: String?) {
             val idx = utteranceId?.removePrefix("chunk_")?.toIntOrNull() ?: return
             if (idx == articleChunks.lastIndex && _state.value.isPlaying) {
-                scope.launch {
-                    if (queue.isNotEmpty()) {
-                        val next = queue.removeAt(0)
-                        _state.value = _state.value.copy(playlist = queue.toList())
-                        loadAndPlay(next.title)
-                    } else autoJump()
+                scope.launch { onArticleFinished() }
+            }
+        }
+    }
+
+    // ─── Core TTS dispatch ───────────────────────────────────────────────────
+
+    /** Speak the remaining article text starting from [startChar]. */
+    private fun seekToText(startChar: Int) {
+        val safeStart = startChar.coerceIn(0, articleText.length)
+        val remaining = articleText.substring(safeStart)
+        if (remaining.isBlank()) return
+
+        val newChunks = chunkText(remaining)
+        val newOffsets = computeOffsets(newChunks).map { it + safeStart }
+        articleChunks = newChunks
+        chunkOffsets = newOffsets
+        pausedAtChunk = 0
+        currentAbsoluteChar = safeStart
+
+        val engine = kokoro
+        if (engine != null) {
+            speakWithKokoro(engine, newChunks)
+        } else {
+            speakWithAndroidTts(0)
+        }
+        startProgressTimer()
+    }
+
+    private fun speakWithKokoro(engine: KokoroEngine, chunks: List<String>) {
+        speakJob?.cancel()
+        engine.stop()
+        speakJob = scope.launch(Dispatchers.IO) {
+            for ((i, chunk) in chunks.withIndex()) {
+                if (!isActive) break
+                var chunkDone = false
+                engine.speak(
+                    text = chunk,
+                    rate = _state.value.speechRate,
+                    onProgress = { offset ->
+                        currentAbsoluteChar = chunkOffsets.getOrElse(i) { 0 } + offset
+                    },
+                    onDone = { chunkDone = true }
+                )
+                if (!chunkDone) break   // stopped mid-chunk
+                if (i == chunks.lastIndex && _state.value.isPlaying) {
+                    scope.launch { onArticleFinished() }
                 }
             }
         }
     }
 
-    // ─── Text-to-speech helpers ──────────────────────────────────────────────
+    private fun speakWithAndroidTts(fromChunk: Int) {
+        androidTts?.stop()
+        for (i in fromChunk until articleChunks.size) {
+            val mode = if (i == fromChunk) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+            androidTts?.speak(articleChunks[i], mode, null, "chunk_$i")
+        }
+    }
 
-    /**
-     * Speak text for a brand-new article (resets all position state).
-     */
+    private fun stopSpeaking() {
+        speakJob?.cancel()
+        kokoro?.stop()
+        androidTts?.stop()
+    }
+
+    private fun findSentenceStart(absoluteChar: Int): Int {
+        if (absoluteChar <= 0 || articleText.isEmpty()) return 0
+        val pos = absoluteChar.coerceAtMost(articleText.length)
+        val last = maxOf(
+            articleText.lastIndexOf(". ", pos),
+            articleText.lastIndexOf("! ", pos),
+            articleText.lastIndexOf("? ", pos)
+        )
+        return if (last >= 0) (last + 2).coerceAtMost(articleText.length) else 0
+    }
+
+    // ─── Article lifecycle ────────────────────────────────────────────────────
+
     private fun loadAndSpeak(text: String) {
-        val chunks = chunkText(text)
-        val offsets = computeOffsets(chunks)
+        if (kokoro == null && !androidTtsReady) { pendingText = text; return }
         articleText = text
-        articleChunks = chunks
-        chunkOffsets = offsets
+        articleChunks = chunkText(text)
+        chunkOffsets = computeOffsets(articleChunks)
         pausedAtChunk = 0
         currentAbsoluteChar = 0
         _state.value = _state.value.copy(playbackProgress = 0f)
-        speakFrom(0)
-        startProgressTimer()
+        seekToText(0)
+    }
+
+    private fun speakText(text: String) {
+        if (kokoro == null && !androidTtsReady) { pendingText = text; return }
+        loadAndSpeak(text)
+    }
+
+    private suspend fun onArticleFinished() {
+        if (queue.isNotEmpty()) {
+            val next = queue.removeAt(0)
+            _state.value = _state.value.copy(playlist = queue.toList())
+            loadAndPlay(next.title)
+        } else {
+            autoJump()
+        }
     }
 
     private fun chunkText(text: String): List<String> {
@@ -175,65 +288,12 @@ class WikiFMService : Service() {
     }
 
     private fun computeOffsets(chunks: List<String>): List<Int> {
-        val offsets = mutableListOf<Int>()
-        var pos = 0
-        chunks.forEach { chunk -> offsets.add(pos); pos += chunk.length + 1 }
+        val offsets = mutableListOf<Int>(); var pos = 0
+        chunks.forEach { offsets.add(pos); pos += it.length + 1 }
         return offsets
     }
 
-    /**
-     * Find the start of the sentence that contains [absoluteChar].
-     * Searches backwards for the nearest ". " / "! " / "? " before that position.
-     */
-    private fun findSentenceStart(absoluteChar: Int): Int {
-        if (absoluteChar <= 0 || articleText.isEmpty()) return 0
-        val safePos = absoluteChar.coerceAtMost(articleText.length)
-        val last = maxOf(
-            articleText.lastIndexOf(". ", safePos),
-            articleText.lastIndexOf("! ", safePos),
-            articleText.lastIndexOf("? ", safePos)
-        )
-        return if (last >= 0) (last + 2).coerceAtMost(articleText.length) else 0
-    }
-
-    /**
-     * Rebuild chunks starting from [startChar] in [articleText] and begin speaking.
-     * This is the single entry-point for resume, speed-change, and seeking so they
-     * all use sentence-level precision instead of coarse chunk-level.
-     */
-    private fun seekToText(startChar: Int) {
-        val safeStart = startChar.coerceIn(0, articleText.length)
-        val remaining = articleText.substring(safeStart)
-        if (remaining.isBlank()) return
-        val newChunks = chunkText(remaining)
-        val newOffsets = computeOffsets(newChunks).map { it + safeStart }
-        articleChunks = newChunks
-        chunkOffsets = newOffsets
-        pausedAtChunk = 0
-        currentAbsoluteChar = safeStart
-        speakFrom(0)
-    }
-
-    /**
-     * Low-level: queue [articleChunks] starting from [fromChunk].
-     * Always stops current playback first.
-     */
-    private fun speakFrom(fromChunk: Int) {
-        if (!ttsReady || articleChunks.isEmpty()) return
-        tts?.stop()
-        for (i in fromChunk until articleChunks.size) {
-            val mode = if (i == fromChunk) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-            tts?.speak(articleChunks[i], mode, null, "chunk_$i")
-        }
-    }
-
-    private fun speakText(text: String) {
-        if (!ttsReady) { pendingText = text; return }
-        pendingText = null
-        loadAndSpeak(text)
-    }
-
-    // ─── Progress timer ──────────────────────────────────────────────────────
+    // ─── Progress timer ───────────────────────────────────────────────────────
 
     private fun startProgressTimer() {
         progressJob?.cancel()
@@ -242,14 +302,15 @@ class WikiFMService : Service() {
                 delay(300)
                 val total = articleText.length
                 if (total > 0 && _state.value.isPlaying) {
-                    val progress = (currentAbsoluteChar.toFloat() / total).coerceIn(0f, 1f)
-                    _state.value = _state.value.copy(playbackProgress = progress)
+                    _state.value = _state.value.copy(
+                        playbackProgress = (currentAbsoluteChar.toFloat() / total).coerceIn(0f, 1f)
+                    )
                 }
             }
         }
     }
 
-    // ─── Public playback API ─────────────────────────────────────────────────
+    // ─── Public API ───────────────────────────────────────────────────────────
 
     fun playTitle(title: String) {
         scope.launch {
@@ -298,7 +359,7 @@ class WikiFMService : Service() {
     }
 
     fun pause() {
-        tts?.stop()   // pausedAtChunk / currentAbsoluteChar already updated by onStart/onRangeStart
+        stopSpeaking()
         jumpJob?.cancel()
         sleepTimerJob?.cancel()
         progressJob?.cancel()
@@ -312,12 +373,11 @@ class WikiFMService : Service() {
         startFg(buildNotification(_state.value.currentTitle))
         seekToText(findSentenceStart(currentAbsoluteChar))
         scheduleJump()
-        startProgressTimer()
     }
 
     fun skip() {
         scope.launch {
-            tts?.stop()
+            stopSpeaking()
             jumpJob?.cancel()
             _state.value = _state.value.copy(isLoading = true)
             startFg(buildNotification("Skipping…"))
@@ -331,51 +391,17 @@ class WikiFMService : Service() {
 
     fun seekTo(progress: Float) {
         val targetChar = (progress * articleText.length).toInt()
+        currentAbsoluteChar = targetChar
         _state.value = _state.value.copy(playbackProgress = progress)
         seekToText(findSentenceStart(targetChar))
     }
 
-    // ─── Jump / auto-advance ─────────────────────────────────────────────────
-
-    private fun scheduleJump() {
-        jumpJob?.cancel()
-        val min = _state.value.jumpIntervalMinutes
-        if (min > 0) jumpJob = scope.launch {
-            delay(min * 60_000L)
-            if (_state.value.isPlaying) autoJump()
-        }
-    }
-
-    private suspend fun autoJump() {
-        val title = _state.value.currentTitle
-        val next = repository.getRelatedTitles(title).filter { it != title }.randomOrNull()
-        if (next != null) repository.getFullArticle(next).onSuccess { playArticle(it) }.onFailure { playRandom() }
-        else playRandom()
-    }
-
-    private fun fail(msg: String) {
-        _state.value = _state.value.copy(isLoading = false, isPlaying = false, error = msg)
-        stopForeground(STOP_FOREGROUND_REMOVE)
-    }
-
-    // ─── Controls ────────────────────────────────────────────────────────────
-
     fun setSpeechRate(rate: Float) {
-        tts?.setSpeechRate(rate)
+        androidTts?.setSpeechRate(rate)
         _state.value = _state.value.copy(speechRate = rate)
-        if (_state.value.isPlaying && articleText.isNotBlank()) seekToText(findSentenceStart(currentAbsoluteChar))
-    }
-
-    fun setVoice(voice: Voice) {
-        tts?.voice = voice
-        prefs().edit().putString("voice_name", voice.name).apply()
-        _state.value = _state.value.copy(selectedVoiceName = voice.name)
-        if (_state.value.isPlaying) seekToText(findSentenceStart(currentAbsoluteChar))
-    }
-
-    fun previewVoice(voice: Voice) {
-        tts?.voice = voice
-        tts?.speak("Hello. I am your Wikipedia radio guide.", TextToSpeech.QUEUE_FLUSH, null, "preview")
+        if (_state.value.isPlaying && articleText.isNotBlank()) {
+            seekToText(findSentenceStart(currentAbsoluteChar))
+        }
     }
 
     fun setJumpInterval(minutes: Int) {
@@ -400,7 +426,30 @@ class WikiFMService : Service() {
     fun removeFromPlaylist(title: String) { queue.removeAll { it.title == title }; _state.value = _state.value.copy(playlist = queue.toList()) }
     fun clearPlaylist() { queue.clear(); _state.value = _state.value.copy(playlist = emptyList()) }
 
-    // ─── Notification / foreground ───────────────────────────────────────────
+    // ─── Auto-jump ────────────────────────────────────────────────────────────
+
+    private fun scheduleJump() {
+        jumpJob?.cancel()
+        val min = _state.value.jumpIntervalMinutes
+        if (min > 0) jumpJob = scope.launch {
+            delay(min * 60_000L)
+            if (_state.value.isPlaying) autoJump()
+        }
+    }
+
+    private suspend fun autoJump() {
+        val title = _state.value.currentTitle
+        val next = repository.getRelatedTitles(title).filter { it != title }.randomOrNull()
+        if (next != null) repository.getFullArticle(next).onSuccess { playArticle(it) }.onFailure { playRandom() }
+        else playRandom()
+    }
+
+    private fun fail(msg: String) {
+        _state.value = _state.value.copy(isLoading = false, isPlaying = false, error = msg)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+    }
+
+    // ─── Notification ─────────────────────────────────────────────────────────
 
     private fun createNotificationChannel() {
         val ch = NotificationChannel(CHANNEL_ID, getString(R.string.notification_channel_name), NotificationManager.IMPORTANCE_LOW)
@@ -425,7 +474,12 @@ class WikiFMService : Service() {
         else startForeground(NOTIFICATION_ID, notification)
     }
 
-    override fun onDestroy() { scope.cancel(); tts?.shutdown(); super.onDestroy() }
+    override fun onDestroy() {
+        scope.cancel()
+        kokoro?.release()
+        androidTts?.shutdown()
+        super.onDestroy()
+    }
 
     companion object {
         const val CHANNEL_ID = "wikifm_channel"
