@@ -24,7 +24,7 @@ data class WikiFMState(
     val isLoading: Boolean = false,
     val currentTitle: String = "",
     val currentExtract: String = "",
-    val speechRate: Float = 0.9f,
+    val speechRate: Float = 1.0f,
     val jumpIntervalMinutes: Int = 3,
     val error: String? = null,
     val playlist: List<ArticleItem> = emptyList(),
@@ -75,7 +75,7 @@ class WikiFMService : Service() {
                 ttsReady = true
                 tts?.language = Locale.US
                 tts?.setPitch(0.85f)       // noticeably lower, calmer radio tone
-                tts?.setSpeechRate(0.9f)   // slightly slower, more deliberate
+                tts?.setSpeechRate(1.0f)   // default 1x
                 tts?.setOnUtteranceProgressListener(utteranceListener)
 
                 val voices = qualityVoices()
