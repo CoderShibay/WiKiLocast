@@ -24,14 +24,15 @@ data class WikiFMState(
     val isLoading: Boolean = false,
     val currentTitle: String = "",
     val currentExtract: String = "",
-    val speechRate: Float = 0.95f,
+    val speechRate: Float = 0.9f,
     val jumpIntervalMinutes: Int = 3,
     val error: String? = null,
     val playlist: List<ArticleItem> = emptyList(),
     val suggestions: List<ArticleItem> = emptyList(),
     val sleepTimerSeconds: Int = 0,
     val availableVoices: List<Voice> = emptyList(),
-    val selectedVoiceName: String = ""
+    val selectedVoiceName: String = "",
+    val playbackProgress: Float = 0f   // 0.0 – 1.0
 )
 
 class WikiFMService : Service() {
@@ -52,11 +53,16 @@ class WikiFMService : Service() {
     private var pendingText: String? = null
     private var jumpJob: Job? = null
     private var sleepTimerJob: Job? = null
+    private var progressJob: Job? = null
     private val queue = mutableListOf<ArticleItem>()
 
-    // Chunk tracking for accurate pause/resume
+    // Chunk tracking – @Volatile so the TTS callback thread and main thread agree
     private var articleChunks: List<String> = emptyList()
-    private var pausedAtChunk: Int = 0
+    private var chunkOffsets: List<Int> = emptyList()    // char start of each chunk in full text
+    private var articleText: String = ""
+
+    @Volatile private var pausedAtChunk: Int = 0
+    @Volatile private var currentAbsoluteChar: Int = 0
 
     override fun onBind(intent: Intent): IBinder = binder
 
@@ -68,24 +74,21 @@ class WikiFMService : Service() {
             if (status == TextToSpeech.SUCCESS) {
                 ttsReady = true
                 tts?.language = Locale.US
-                tts?.setPitch(0.92f)          // slightly lower — calmer, more radio-like
-                tts?.setSpeechRate(0.95f)     // slightly slower default
+                tts?.setPitch(0.85f)       // noticeably lower, calmer radio tone
+                tts?.setSpeechRate(0.9f)   // slightly slower, more deliberate
                 tts?.setOnUtteranceProgressListener(utteranceListener)
 
                 val voices = qualityVoices()
-                val selected = voices.find { it.name == savedVoice }
-                    ?: bestSoothingVoice(voices)
-                if (selected != null) tts?.voice = selected
-
-                _state.value = _state.value.copy(
-                    availableVoices = voices,
-                    selectedVoiceName = selected?.name ?: ""
-                )
-                pendingText?.let { t ->
-                    articleChunks = chunkText(t)
-                    pausedAtChunk = 0
-                    speakFrom(0)
+                val selected = voices.find { it.name == savedVoice } ?: pickSoothingVoice(voices)
+                if (selected != null) {
+                    tts?.voice = selected
+                    _state.value = _state.value.copy(
+                        availableVoices = voices,
+                        selectedVoiceName = selected.name
+                    )
                 }
+
+                pendingText?.let { loadAndSpeak(it) }
                 pendingText = null
             }
         }
@@ -96,24 +99,40 @@ class WikiFMService : Service() {
     private fun qualityVoices(): List<Voice> =
         tts?.voices
             ?.filter { it.locale.language == "en" && !it.isNetworkConnectionRequired && it.quality >= Voice.QUALITY_NORMAL }
-            ?.sortedWith(compareByDescending<Voice> { it.quality }.thenBy { it.locale.country }.thenBy { it.name })
+            ?.sortedWith(compareByDescending<Voice> { it.quality }.thenBy { it.name })
             ?.toList() ?: emptyList()
 
-    // Prefer British voices — calmer, more soothing for long-form listening
-    private fun bestSoothingVoice(voices: List<Voice>): Voice? {
-        val british = voices.filter { it.locale.country == "GB" }
-        if (british.isNotEmpty()) return british.maxByOrNull { it.quality }
-        val australian = voices.filter { it.locale.country == "AU" }
-        if (australian.isNotEmpty()) return australian.maxByOrNull { it.quality }
+    /**
+     * Pick a voice that sounds calm and radio-like.
+     * British → Indian → Irish → highest quality American.
+     * These tend to have a warmer, more natural cadence for long-form listening.
+     */
+    private fun pickSoothingVoice(voices: List<Voice>): Voice? {
+        for (country in listOf("GB", "IN", "IE", "AU", "NZ")) {
+            val match = voices.filter { it.locale.country == country }.maxByOrNull { it.quality }
+            if (match != null) return match
+        }
         return voices.maxByOrNull { it.quality }
     }
 
+    // ─── Utterance listener ─────────────────────────────────────────────────
+
     private val utteranceListener = object : UtteranceProgressListener() {
+
         override fun onStart(utteranceId: String?) {
-            // Track which chunk we're currently reading
-            utteranceId?.removePrefix("chunk_")?.toIntOrNull()?.let { pausedAtChunk = it }
+            val idx = utteranceId?.removePrefix("chunk_")?.toIntOrNull() ?: return
+            pausedAtChunk = idx
+            currentAbsoluteChar = chunkOffsets.getOrElse(idx) { 0 }
         }
+
+        // Word-level progress (API 26+) – fires for every word spoken
+        override fun onRangeStart(utteranceId: String, start: Int, end: Int, frame: Int) {
+            val idx = utteranceId.removePrefix("chunk_").toIntOrNull() ?: return
+            currentAbsoluteChar = chunkOffsets.getOrElse(idx) { 0 } + start
+        }
+
         override fun onError(utteranceId: String?) {}
+
         override fun onDone(utteranceId: String?) {
             val idx = utteranceId?.removePrefix("chunk_")?.toIntOrNull() ?: return
             if (idx == articleChunks.lastIndex && _state.value.isPlaying) {
@@ -128,22 +147,22 @@ class WikiFMService : Service() {
         }
     }
 
-    // Speak from a specific chunk index (enables proper resume)
-    private fun speakFrom(fromChunk: Int) {
-        if (!ttsReady || articleChunks.isEmpty()) return
-        for (i in fromChunk until articleChunks.size) {
-            val mode = if (i == fromChunk) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-            tts?.speak(articleChunks[i], mode, null, "chunk_$i")
-        }
-    }
+    // ─── Text-to-speech helpers ──────────────────────────────────────────────
 
-    // New article — resets chunk tracking
-    private fun speakText(text: String) {
-        if (!ttsReady) { pendingText = text; return }
-        pendingText = null
-        articleChunks = chunkText(text)
+    /**
+     * Speak text for a brand-new article (resets all position state).
+     */
+    private fun loadAndSpeak(text: String) {
+        val chunks = chunkText(text)
+        val offsets = computeOffsets(chunks)
+        articleText = text
+        articleChunks = chunks
+        chunkOffsets = offsets
         pausedAtChunk = 0
+        currentAbsoluteChar = 0
+        _state.value = _state.value.copy(playbackProgress = 0f)
         speakFrom(0)
+        startProgressTimer()
     }
 
     private fun chunkText(text: String): List<String> {
@@ -154,6 +173,50 @@ class WikiFMService : Service() {
             acc
         }
     }
+
+    private fun computeOffsets(chunks: List<String>): List<Int> {
+        val offsets = mutableListOf<Int>()
+        var pos = 0
+        chunks.forEach { chunk -> offsets.add(pos); pos += chunk.length + 1 }
+        return offsets
+    }
+
+    /**
+     * Queue chunks starting from [fromChunk].
+     * Always stops current playback first for a clean slate.
+     */
+    private fun speakFrom(fromChunk: Int) {
+        if (!ttsReady || articleChunks.isEmpty()) return
+        tts?.stop()
+        for (i in fromChunk until articleChunks.size) {
+            val mode = if (i == fromChunk) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+            tts?.speak(articleChunks[i], mode, null, "chunk_$i")
+        }
+    }
+
+    private fun speakText(text: String) {
+        if (!ttsReady) { pendingText = text; return }
+        pendingText = null
+        loadAndSpeak(text)
+    }
+
+    // ─── Progress timer ──────────────────────────────────────────────────────
+
+    private fun startProgressTimer() {
+        progressJob?.cancel()
+        progressJob = scope.launch {
+            while (true) {
+                delay(300)
+                val total = articleText.length
+                if (total > 0 && _state.value.isPlaying) {
+                    val progress = (currentAbsoluteChar.toFloat() / total).coerceIn(0f, 1f)
+                    _state.value = _state.value.copy(playbackProgress = progress)
+                }
+            }
+        }
+    }
+
+    // ─── Public playback API ─────────────────────────────────────────────────
 
     fun playTitle(title: String) {
         scope.launch {
@@ -201,6 +264,49 @@ class WikiFMService : Service() {
         )
     }
 
+    fun pause() {
+        tts?.stop()   // pausedAtChunk / currentAbsoluteChar already updated by onStart/onRangeStart
+        jumpJob?.cancel()
+        sleepTimerJob?.cancel()
+        progressJob?.cancel()
+        _state.value = _state.value.copy(isPlaying = false, sleepTimerSeconds = 0)
+        stopForeground(STOP_FOREGROUND_DETACH)
+    }
+
+    fun resume() {
+        if (_state.value.currentExtract.isBlank()) return
+        _state.value = _state.value.copy(isPlaying = true)
+        startFg(buildNotification(_state.value.currentTitle))
+        speakFrom(pausedAtChunk)   // ← exact chunk where we stopped
+        scheduleJump()
+        startProgressTimer()
+    }
+
+    fun skip() {
+        scope.launch {
+            tts?.stop()
+            jumpJob?.cancel()
+            _state.value = _state.value.copy(isLoading = true)
+            startFg(buildNotification("Skipping…"))
+            if (queue.isNotEmpty()) {
+                val next = queue.removeAt(0)
+                _state.value = _state.value.copy(playlist = queue.toList())
+                loadAndPlay(next.title)
+            } else autoJump()
+        }
+    }
+
+    fun seekTo(progress: Float) {
+        val targetChar = (progress * articleText.length).toInt()
+        val chunkIdx = chunkOffsets.indices.lastOrNull { chunkOffsets[it] <= targetChar } ?: 0
+        pausedAtChunk = chunkIdx
+        currentAbsoluteChar = targetChar
+        _state.value = _state.value.copy(playbackProgress = progress)
+        if (_state.value.isPlaying) speakFrom(chunkIdx)
+    }
+
+    // ─── Jump / auto-advance ─────────────────────────────────────────────────
+
     private fun scheduleJump() {
         jumpJob?.cancel()
         val min = _state.value.jumpIntervalMinutes
@@ -222,61 +328,14 @@ class WikiFMService : Service() {
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
-    fun pause() {
-        tts?.stop()           // pausedAtChunk is already set from onStart
-        jumpJob?.cancel()
-        sleepTimerJob?.cancel()
-        _state.value = _state.value.copy(isPlaying = false, sleepTimerSeconds = 0)
-        stopForeground(STOP_FOREGROUND_DETACH)
-    }
+    // ─── Controls ────────────────────────────────────────────────────────────
 
-    fun resume() {
-        if (_state.value.currentExtract.isBlank()) return
-        _state.value = _state.value.copy(isPlaying = true)
-        startFg(buildNotification(_state.value.currentTitle))
-        speakFrom(pausedAtChunk)   // resume from exact chunk where we stopped
-        scheduleJump()
-    }
-
-    fun skip() {
-        scope.launch {
-            tts?.stop()
-            jumpJob?.cancel()
-            _state.value = _state.value.copy(isLoading = true)
-            startFg(buildNotification("Skipping…"))
-            if (queue.isNotEmpty()) {
-                val next = queue.removeAt(0)
-                _state.value = _state.value.copy(playlist = queue.toList())
-                loadAndPlay(next.title)
-            } else {
-                autoJump()
-            }
-        }
-    }
-
-    // Applies immediately — restarts from current chunk with new rate
     fun setSpeechRate(rate: Float) {
         tts?.setSpeechRate(rate)
         _state.value = _state.value.copy(speechRate = rate)
-        if (_state.value.isPlaying && articleChunks.isNotEmpty()) {
-            speakFrom(pausedAtChunk)
-        }
+        if (_state.value.isPlaying && articleChunks.isNotEmpty()) speakFrom(pausedAtChunk)
     }
 
-    // Playlist
-    fun addToPlaylist(item: ArticleItem) {
-        if (queue.none { it.title == item.title }) {
-            queue.add(item)
-            _state.value = _state.value.copy(playlist = queue.toList())
-        }
-    }
-    fun removeFromPlaylist(title: String) {
-        queue.removeAll { it.title == title }
-        _state.value = _state.value.copy(playlist = queue.toList())
-    }
-    fun clearPlaylist() { queue.clear(); _state.value = _state.value.copy(playlist = emptyList()) }
-
-    // Voice
     fun setVoice(voice: Voice) {
         tts?.voice = voice
         prefs().edit().putString("voice_name", voice.name).apply()
@@ -304,6 +363,14 @@ class WikiFMService : Service() {
             pause()
         }
     }
+
+    fun addToPlaylist(item: ArticleItem) {
+        if (queue.none { it.title == item.title }) { queue.add(item); _state.value = _state.value.copy(playlist = queue.toList()) }
+    }
+    fun removeFromPlaylist(title: String) { queue.removeAll { it.title == title }; _state.value = _state.value.copy(playlist = queue.toList()) }
+    fun clearPlaylist() { queue.clear(); _state.value = _state.value.copy(playlist = emptyList()) }
+
+    // ─── Notification / foreground ───────────────────────────────────────────
 
     private fun createNotificationChannel() {
         val ch = NotificationChannel(CHANNEL_ID, getString(R.string.notification_channel_name), NotificationManager.IMPORTANCE_LOW)

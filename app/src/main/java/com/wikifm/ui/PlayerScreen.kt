@@ -211,7 +211,18 @@ private fun PlayerBody(
             }
         }
 
-        Spacer(Modifier.height(28.dp))
+        // Progress bar
+        if (state.currentExtract.isNotBlank()) {
+            Spacer(Modifier.height(20.dp))
+            PlaybackProgressBar(
+                progress = state.playbackProgress,
+                articleLength = state.currentExtract.length,
+                speechRate = state.speechRate,
+                onSeek = { viewModel.seekTo(it) }
+            )
+        }
+
+        Spacer(Modifier.height(20.dp))
 
         // Transport controls
         Row(horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -343,6 +354,44 @@ fun GlassCard(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
             .background(Brush.linearGradient(listOf(Color(0x1EFFFFFF), Color(0x0AFFFFFF))))
             .border(1.dp, GlassBorder, RoundedCornerShape(18.dp))
     ) { content() }
+}
+
+@Composable
+private fun PlaybackProgressBar(
+    progress: Float,
+    articleLength: Int,
+    speechRate: Float,
+    onSeek: (Float) -> Unit
+) {
+    // Rough estimate: ~14 chars/sec at 1x speed
+    val totalSecs = (articleLength / (14f * speechRate)).toInt().coerceAtLeast(1)
+    val currentSecs = (progress * totalSecs).toInt()
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Slider(
+            value = progress,
+            onValueChange = onSeek,
+            modifier = Modifier.fillMaxWidth(),
+            colors = SliderDefaults.colors(
+                thumbColor = TextPrimary,
+                activeTrackColor = TextPrimary,
+                inactiveTrackColor = GlassBorder
+            )
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(formatTime(currentSecs), style = MaterialTheme.typography.labelSmall)
+            Text(formatTime(totalSecs), style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+private fun formatTime(seconds: Int): String {
+    val m = seconds / 60
+    val s = seconds % 60
+    return "%d:%02d".format(m, s)
 }
 
 @Composable

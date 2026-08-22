@@ -90,6 +90,7 @@ class WikiFMViewModel(app: Application) : AndroidViewModel(app) {
     fun pause() = _service.value?.pause()
     fun resume() = _service.value?.resume()
     fun skip() = _service.value?.skip()
+    fun seekTo(progress: Float) = _service.value?.seekTo(progress)
     fun setSpeechRate(rate: Float) = _service.value?.setSpeechRate(rate)
     fun setJumpInterval(minutes: Int) = _service.value?.setJumpInterval(minutes)
     fun setSleepTimer(minutes: Int) = _service.value?.setSleepTimer(minutes)
