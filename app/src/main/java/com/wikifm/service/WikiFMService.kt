@@ -14,6 +14,8 @@ import com.wikifm.R
 import com.wikifm.data.ArticleItem
 import com.wikifm.data.WikiSummary
 import com.wikifm.data.WikipediaRepository
+import com.wikifm.tts.KokoroEngine
+import com.wikifm.tts.ModelManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -30,7 +32,12 @@ data class WikiFMState(
     val playlist: List<ArticleItem> = emptyList(),
     val suggestions: List<ArticleItem> = emptyList(),
     val sleepTimerSeconds: Int = 0,
-    val playbackProgress: Float = 0f
+    val playbackProgress: Float = 0f,
+    // Kokoro model download
+    val kokoroDownloading: Boolean = false,
+    val kokoroReady: Boolean = false,
+    val kokoroProgress: Float = 0f,
+    val kokoroLabel: String = ""
 )
 
 class WikiFMService : Service() {
@@ -46,6 +53,12 @@ class WikiFMService : Service() {
     private val _state = MutableStateFlow(WikiFMState())
     val state: StateFlow<WikiFMState> = _state
 
+    // Kokoro (primary — downloads on first launch)
+    private val modelManager by lazy { ModelManager(this) }
+    private var kokoro: KokoroEngine? = null
+    private var kokoroJob: Job? = null
+
+    // Android TTS (fallback while Kokoro downloads or if unavailable)
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var pendingText: String? = null
@@ -65,6 +78,7 @@ class WikiFMService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        initKokoroAsync()
         tts = TextToSpeech(this) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 ttsReady = true
@@ -76,6 +90,36 @@ class WikiFMService : Service() {
                 pendingText?.let { loadAndSpeak(it) }
                 pendingText = null
             }
+        }
+    }
+
+    private fun initKokoroAsync() {
+        scope.launch(Dispatchers.IO) {
+            if (modelManager.isReady()) {
+                tryStartKokoro()
+            } else {
+                withContext(Dispatchers.Main) {
+                    _state.value = _state.value.copy(kokoroDownloading = true, kokoroLabel = "Downloading Kokoro voice…")
+                }
+                val result = modelManager.download { done, total, label ->
+                    val progress = if (total > 0) done.toFloat() / total else 0f
+                    _state.value = _state.value.copy(kokoroProgress = progress, kokoroLabel = label)
+                }
+                if (result.isSuccess) tryStartKokoro()
+                else withContext(Dispatchers.Main) {
+                    _state.value = _state.value.copy(kokoroDownloading = false, kokoroLabel = "Download failed — using system voice")
+                }
+            }
+        }
+    }
+
+    private fun tryStartKokoro() {
+        val engine = KokoroEngine(modelManager.modelDir)
+        if (engine.init()) {
+            kokoro = engine
+            _state.value = _state.value.copy(kokoroReady = true, kokoroDownloading = false, kokoroLabel = "Kokoro voice active")
+        } else {
+            _state.value = _state.value.copy(kokoroDownloading = false, kokoroLabel = "Voice init failed — using system voice")
         }
     }
 
@@ -146,11 +190,35 @@ class WikiFMService : Service() {
     }
 
     private fun speakFrom(fromChunk: Int) {
-        if (!ttsReady || articleChunks.isEmpty()) return
-        tts?.stop()
-        for (i in fromChunk until articleChunks.size) {
-            val mode = if (i == fromChunk) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-            tts?.speak(articleChunks[i], mode, null, "chunk_$i")
+        val engine = kokoro
+        if (engine != null) {
+            // Kokoro: stream each chunk via neural TTS
+            kokoroJob?.cancel()
+            engine.stop()
+            kokoroJob = scope.launch(Dispatchers.IO) {
+                for (i in fromChunk until articleChunks.size) {
+                    if (!isActive || !_state.value.isPlaying) break
+                    pausedAtChunk = i
+                    var done = false
+                    engine.speak(
+                        text = articleChunks[i],
+                        rate = _state.value.speechRate,
+                        onProgress = { offset -> currentAbsoluteChar = chunkOffsets.getOrElse(i) { 0 } + offset }
+                    ) { done = true }
+                    if (!done) break
+                    if (i == articleChunks.lastIndex && _state.value.isPlaying) {
+                        scope.launch { onArticleFinished() }
+                    }
+                }
+            }
+        } else {
+            // Android TTS fallback
+            if (!ttsReady || articleChunks.isEmpty()) return
+            tts?.stop()
+            for (i in fromChunk until articleChunks.size) {
+                val mode = if (i == fromChunk) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+                tts?.speak(articleChunks[i], mode, null, "chunk_$i")
+            }
         }
     }
 
@@ -239,6 +307,7 @@ class WikiFMService : Service() {
     }
 
     fun pause() {
+        kokoroJob?.cancel(); kokoro?.stop()
         tts?.stop()
         jumpJob?.cancel(); sleepTimerJob?.cancel(); progressJob?.cancel()
         _state.value = _state.value.copy(isPlaying = false, sleepTimerSeconds = 0)
@@ -345,7 +414,7 @@ class WikiFMService : Service() {
         else startForeground(NOTIFICATION_ID, notification)
     }
 
-    override fun onDestroy() { scope.cancel(); tts?.shutdown(); super.onDestroy() }
+    override fun onDestroy() { scope.cancel(); kokoro?.release(); tts?.shutdown(); super.onDestroy() }
 
     companion object {
         const val CHANNEL_ID = "wikifm_channel"
