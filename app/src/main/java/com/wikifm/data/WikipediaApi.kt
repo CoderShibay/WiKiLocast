@@ -6,11 +6,8 @@ import retrofit2.http.Query
 
 data class WikiSummary(
     val title: String,
-    val extract: String = "",
-    val thumbnail: WikiThumbnail? = null
+    val extract: String = ""
 )
-
-data class WikiThumbnail(val source: String)
 
 data class RelatedResponse(val pages: List<RelatedPage>)
 data class RelatedPage(val title: String)
@@ -24,12 +21,23 @@ data class SearchResult(
     val cleanSnippet: String get() = snippet.replace(Regex("<[^>]+>"), "").trim()
 }
 
+// Full article extract via action API
+data class ExtractResponse(val query: ExtractQuery)
+data class ExtractQuery(val pages: Map<String, ExtractPage>)
+data class ExtractPage(val title: String = "", val extract: String = "")
+
 interface WikipediaApi {
+    // Short summary — used for search result cards only
     @GET("api/rest_v1/page/summary/{title}")
     suspend fun getSummary(@Path("title", encoded = true) title: String): WikiSummary
 
+    // Random article title (we then fetch full text separately)
     @GET("api/rest_v1/page/random/summary")
     suspend fun getRandomSummary(): WikiSummary
+
+    // Full plain-text article — explaintext strips wiki markup
+    @GET("w/api.php?action=query&prop=extracts&format=json&explaintext=true&redirects=true")
+    suspend fun getFullExtract(@Query("titles") title: String): ExtractResponse
 
     @GET("api/rest_v1/page/related/{title}")
     suspend fun getRelated(@Path("title", encoded = true) title: String): RelatedResponse

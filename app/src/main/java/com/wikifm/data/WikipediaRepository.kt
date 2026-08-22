@@ -23,19 +23,38 @@ class WikipediaRepository {
 
     private fun String.toWikiPath() = trim().replace(" ", "_")
 
+    // Fetch full article text via extracts API
+    suspend fun getFullArticle(title: String): Result<WikiSummary> = runCatching {
+        val response = api.getFullExtract(title.toWikiPath())
+        val page = response.query.pages.values
+            .firstOrNull { !it.extract.isNullOrBlank() }
+            ?: throw Exception("No content for: $title")
+        WikiSummary(title = page.title.ifBlank { title }, extract = page.extract.cleanWikiText())
+    }
+
+    // Random article: get title first, then fetch full text
+    suspend fun getRandomFullArticle(): Result<WikiSummary> = runCatching {
+        val randomTitle = api.getRandomSummary().title
+        val response = api.getFullExtract(randomTitle.toWikiPath())
+        val page = response.query.pages.values
+            .firstOrNull { !it.extract.isNullOrBlank() }
+            ?: throw Exception("No content")
+        WikiSummary(title = page.title.ifBlank { randomTitle }, extract = page.extract.cleanWikiText())
+    }
+
+    // Search results (short snippets — summary endpoint is fine here)
     suspend fun searchArticles(query: String): List<SearchResult> = runCatching {
         api.search(query).query.search
     }.getOrDefault(emptyList())
 
-    suspend fun getSummary(title: String): Result<WikiSummary> = runCatching {
-        api.getSummary(title.toWikiPath())
-    }
-
-    suspend fun getRandomSummary(): Result<WikiSummary> = runCatching {
-        api.getRandomSummary()
-    }
-
     suspend fun getRelatedTitles(title: String): List<String> = runCatching {
         api.getRelated(title.toWikiPath()).pages.map { it.title }
     }.getOrDefault(emptyList())
+
+    // Strip == Section Headers == and collapse blank lines
+    private fun String.cleanWikiText(): String =
+        replace(Regex("={2,}[^=\n]+={2,}"), "")
+            .replace(Regex("[ \t]+\n"), "\n")
+            .replace(Regex("\n{3,}"), "\n\n")
+            .trim()
 }

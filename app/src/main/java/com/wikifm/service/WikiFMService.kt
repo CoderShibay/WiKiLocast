@@ -263,7 +263,7 @@ class WikiFMService : Service() {
         scope.launch {
             _state.value = _state.value.copy(isPlaying = true, isLoading = true, error = null)
             startFg(buildNotification("Tuning in…"))
-            repository.getRandomSummary()
+            repository.getRandomFullArticle()
                 .onSuccess { playArticle(it) }
                 .onFailure { fail("Couldn't load a random article") }
         }
@@ -271,7 +271,7 @@ class WikiFMService : Service() {
 
     private suspend fun loadAndPlay(title: String) {
         startFg(buildNotification("Loading…"))
-        repository.getSummary(title)
+        repository.getFullArticle(title)
             .onSuccess { playArticle(it) }
             .onFailure { e -> fail(e.message ?: "Network error") }
     }
@@ -349,7 +349,7 @@ class WikiFMService : Service() {
     private suspend fun autoJump() {
         val title = _state.value.currentTitle
         val next = repository.getRelatedTitles(title).filter { it != title }.randomOrNull()
-        if (next != null) repository.getSummary(next).onSuccess { playArticle(it) }.onFailure { playRandom() }
+        if (next != null) repository.getFullArticle(next).onSuccess { playArticle(it) }.onFailure { playRandom() }
         else playRandom()
     }
 
