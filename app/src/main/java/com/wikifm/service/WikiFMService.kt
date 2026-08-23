@@ -198,28 +198,22 @@ class WikiFMService : Service() {
             kokoroJob?.cancel()
             engine.stop()
 
-            // Snapshot the chunk list NOW so a mid-article article change can't corrupt the loop
-            val chunks  = articleChunks.toList()
-            val offsets = chunkOffsets.toList()
+            // Pass the ENTIRE remaining text as one generateWithCallback call.
+            // Kokoro handles sentence splitting internally — no chunk gaps at all.
+            val startChar    = chunkOffsets.getOrElse(fromChunk) { 0 }
+            val remainingText = articleText.substring(startChar).trim()
+            if (remainingText.isEmpty()) return
 
             kokoroJob = scope.launch(Dispatchers.IO) {
                 var playedToEnd = false
-                for (i in fromChunk until chunks.size) {
-                    if (!isActive || !_state.value.isPlaying) break
-                    pausedAtChunk = i
-                    var chunkDone = false
-                    engine.speak(
-                        text = chunks[i],
-                        rate = _state.value.speechRate,
-                        onProgress = { offset ->
-                            currentAbsoluteChar = offsets.getOrElse(i) { 0 } + offset
-                        },
-                        onDone = { chunkDone = true }
-                    )
-                    if (!chunkDone) break          // stopped mid-chunk
-                    if (i == chunks.lastIndex) { playedToEnd = true; break }
-                }
-                // Trigger next article AFTER the loop — never from inside it
+                engine.speakContinuous(
+                    text = remainingText,
+                    rate = _state.value.speechRate,
+                    onProgress = { relativeOffset ->
+                        currentAbsoluteChar = (startChar + relativeOffset).coerceAtMost(articleText.length)
+                    },
+                    onDone = { playedToEnd = true }
+                )
                 if (playedToEnd && isActive && _state.value.isPlaying) {
                     withContext(Dispatchers.Main) { onArticleFinished() }
                 }
